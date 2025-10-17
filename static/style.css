@@ -1,0 +1,13 @@
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Noto Sans JP", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif; margin: 0; background: #f7f7f9; }
+.container { max-width: 820px; margin: 24px auto; padding: 16px; background: white; border-radius: 16px; box-shadow: 0 6px 24px rgba(0,0,0,0.06); }
+h1 { margin-top: 0; font-size: 22px; }
+.chat { padding: 12px; border: 1px solid #eee; border-radius: 12px; background: #fbfbfd; max-height: 60vh; overflow: auto; }
+.msg { margin: 8px 0; padding: 8px 12px; border-radius: 10px; }
+.msg.system { background: #eef4ff; border: 1px solid #dbe7ff; }
+.msg.user { background: #f0f0f0; border: 1px solid #e5e5e5; text-align: right; }
+.msg pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
+.input-form { display: flex; gap: 8px; margin-top: 12px; }
+.input-form input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #ddd; font-size: 16px; }
+.input-form button { padding: 10px 14px; border: none; background: #3b82f6; color: white; border-radius: 8px; font-weight: 600; }
+.input-form .reset { display: inline-block; padding: 10px 14px; background: #eef2ff; border-radius: 8px; text-decoration: none; }

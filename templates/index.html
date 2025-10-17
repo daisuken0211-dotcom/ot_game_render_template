@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="container">
+    <h1>作業療法ゲーム（Webデモ）</h1>
+    <div class="chat">
+      {% for m in history %}
+        <div class="msg {{ m.role }}">
+          <pre>{{ m.text }}</pre>
+        </div>
+      {% endfor %}
+    </div>
+
+    <form method="POST" class="input-form">
+      <input type="text" name="user_input" placeholder="ここに入力して送信" autofocus />
+      <button type="submit">送信</button>
+      <a class="reset" href="{{ url_for('reset') }}">リセット</a>
+    </form>
+  </div>
+{% endblock %}
