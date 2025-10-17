@@ -1,103 +1,122 @@
-# engine.py
-# Replace this simple demo engine with hooks into your actual CLI game.
-# Minimal contract:
-#   - initial_state() -> dict  # any JSON-serializable state
-#   - step(state, user_input) -> (output_text:str, new_state:dict)
+# engine.py — CLIブリッジ版
+# 既存の print/input ベースのゲームをWebで一歩ずつ進めるためのアダプタ。
+# 使い方：
+#   1) 自分のエントリポイントに合わせて ENTRYPOINT を1行だけ書き換える
+#   2) 他は触らなくてOK。既存の *.py はそのままリポジトリに入れる
 
+import builtins
+import threading
+import queue
+import time
+import sys
+from types import SimpleNamespace
+
+# ==== ここをあなたのエントリポイントに合わせて変更 ====
+# 例1: あなたの main.py に def main(): がある場合
+from main import main as ENTRYPOINT
+# 例2: あるモードだけを走らせたいなら:
+# from mtdlp_mode import start_mtdlp_mode as ENTRYPOINT
+# =======================================================
+
+# スレッド間共有（セッションごとに持つ前提：Flask側はセッションでstateを分離）
+class _CliBridge:
+    def __init__(self):
+        self.input_q = queue.Queue()     # ブラウザ→CLI（ユーザー入力）
+        self.output_q = queue.Queue()    # CLI→ブラウザ（print出力）
+        self.thread = None
+        self.started = False
+        self.finished = False
+        self.lock = threading.Lock()
+        self._orig_input = builtins.input
+        self._orig_print = builtins.print
+
+    def _patched_input(self, prompt=""):
+        # promptも出力として拾う
+        if prompt:
+            self.output_q.put(prompt)
+        # 次のユーザー入力が来るまでブロック
+        val = self.input_q.get()  # step() が put するまで待つ
+        return val
+
+    def _patched_print(self, *args, **kwargs):
+        # print内容を文字列にしてキューに入れる
+        end = kwargs.get("end", "\n")
+        sep = kwargs.get("sep", " ")
+        text = sep.join(str(a) for a in args) + end
+        self.output_q.put(text)
+
+    def _worker(self):
+        try:
+            builtins.input = self._patched_input
+            builtins.print = self._patched_print
+            # エントリポイント実行（既存のCLIがここで動く）
+            ENTRYPOINT()
+        except SystemExit:
+            pass
+        except Exception as e:
+            self.output_q.put(f"[エラー] {e}\n")
+        finally:
+            # 復元
+            builtins.input = self._orig_input
+            builtins.print = self._orig_print
+            with self.lock:
+                self.finished = True
+
+    def start_if_needed(self):
+        with self.lock:
+            if not self.started:
+                self.thread = threading.Thread(target=self._worker, daemon=True)
+                self.thread.start()
+                self.started = True
+
+    def push_user_input(self, s: str):
+        # ブラウザからの入力を投入
+        self.input_q.put(s)
+
+    def drain_output(self, timeout=0.2):
+        """一定時間待ちながら、CLI側で溜まった出力をまとめて取り出す"""
+        buf = []
+        # 少し待ってから連続で吸い出す
+        end_time = time.time() + timeout
+        while True:
+            remaining = end_time - time.time()
+            try:
+                line = self.output_q.get(timeout=max(0.01, remaining))
+                buf.append(line)
+            except queue.Empty:
+                break
+        return "".join(buf)
+
+# Flaskセッションごとに1つ持てるよう、状態はシリアライズ可能な最低限だけにする
 def initial_state():
-    return {
-        "scene": "menu",
-        "step": 0,
-    }
+    return {"started": False, "finished": False}
 
+# グローバルにブリッジ実体を置く（プロセス内で共有）。
+# Flaskのsessionでユーザごとに分離されるので、ブラウザのセッション単位で使えばOK。
+_BRIDGE = _CliBridge()
 
-def step(state, user_input):
-    scene = state.get("scene", "menu")
-    step_num = state.get("step", 0)
+def step(state, user_input: str):
+    # 1) 初回はスレッド起動して、CLIの最初の出力（最初のinput前まで）を回収
+    if not state.get("started"):
+        _BRIDGE.start_if_needed()
+        state["started"] = True
+        # 少し待って最初の出力をまとめて取る
+        time.sleep(0.15)
+        out = _BRIDGE.drain_output(timeout=0.3)
+        state["finished"] = _BRIDGE.finished
+        return (out, state)
 
-    if scene == "menu":
-        if step_num == 0:
-            state["step"] = 1
-            return (
-                "ようこそ！作業療法ゲーム（Web版デモ）へ。\n"
-                "次のモードから選んで番号を入力してください：\n"
-                "1) MTDLPモード\n"
-                "2) 目標合意モード\n"
-                "3) 介入設計モード\n"
-                "（数字を入力して送信）",
-                state
-            )
-        else:
-            choice = (user_input or "").strip()
-            if choice == "1":
-                state["scene"] = "mtdlp"
-                state["step"] = 0
-                return ("MTDLPモードを開始します。氏名（例：山口さん）を入力してください。", state)
-            elif choice == "2":
-                state["scene"] = "goal"
-                state["step"] = 0
-                return ("目標合意モードを開始します。生活目標を1つ入力してください。", state)
-            elif choice == "3":
-                state["scene"] = "intervention"
-                state["step"] = 0
-                return ("介入設計モードを開始します。対象の課題を1つ入力してください。", state)
-            else:
-                return ("1〜3の数字を入力してください。", state)
+    # 2) 2回目以降：ユーザー入力を渡して、次のプロンプト/出力が溜まるのを少し待つ
+    if user_input is not None:
+        _BRIDGE.push_user_input(user_input)
 
-    if scene == "mtdlp":
-        if step_num == 0:
-            state["name"] = user_input or "山口さん"
-            state["step"] = 1
-            return (f"{state['name']}ですね。最近の生活の困りごとを1つ入力してください。", state)
-        elif step_num == 1:
-            state["problem"] = user_input or "通勤時の不安"
-            state["step"] = 2
-            return ("その困りごとに対して、あなたが大切にしたい価値観（例：自立・安心・役割継続）を1つ入力してください。", state)
-        else:
-            value = user_input or "安心"
-            state["step"] = 0
-            state["scene"] = "menu"
-            summary = (
-                f"MTDLP要約：\n"
-                f"- 対象者：{state.get('name')}\n"
-                f"- 生活上の困りごと：{state.get('problem')}\n"
-                f"- 重視する価値：{value}\n"
-                "→ この要約はあくまでデモです。実アプリでは既存ロジックに差し替えてください。\n\n"
-                "メニューに戻りました。1〜3を入力してください。"
-            )
-            return (summary, state)
+    # CLIが次の input() に到達する or 終了するまでの出力を回収
+    time.sleep(0.1)
+    out = _BRIDGE.drain_output(timeout=0.4)
+    state["finished"] = _BRIDGE.finished
 
-    if scene == "goal":
-        if step_num == 0:
-            state["goal"] = user_input or "週5日バス通勤"
-            state["step"] = 1
-            return ("その目標をいつまでに達成したいですか？（例：2025-12-31）", state)
-        else:
-            state["deadline"] = user_input or "2025-12-31"
-            state["scene"] = "menu"
-            state["step"] = 0
-            return (
-                f"目標合意メモ：{state['goal']}（目標期限：{state['deadline']}）\n"
-                "メニューに戻りました。1〜3を入力してください。",
-                state
-            )
+    # 終了していて出力が空なら、お別れメッセージ（任意）
+    if state["finished"] and not out.strip():
+        out = "＜シナリオ終了＞\nページ上部のリセットで最初から再開できます。"
 
-    if scene == "intervention":
-        if step_num == 0:
-            state["issue"] = user_input or "移動時のふらつき"
-            state["step"] = 1
-            return ("この課題に対して、環境・人・作業のどれを優先して整えますか？（例：環境）", state)
-        else:
-            choice = (user_input or "環境").strip()
-            state["scene"] = "menu"
-            state["step"] = 0
-            return (
-                f"介入設計メモ：課題={state['issue']} / 優先整備={choice}\n"
-                "メニューに戻りました。1〜3を入力してください。",
-                state
-            )
-
-    # fallback
-    state["scene"] = "menu"
-    state["step"] = 1
-    return ("メニューに戻りました。1〜3の数字を入力してください。", state)
+    return (out, state)
